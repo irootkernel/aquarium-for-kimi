@@ -1,0 +1,44 @@
+{
+  "name": "aquarium",
+  "version": "0.1.9",
+  "description": "Ouroboros-assisted design, durable gates, and evidence-gated delivery with optional Podway v2 execution memory.",
+  "author": "Root Kernel",
+  "homepage": "https://home.rootkernel.xyz",
+  "license": "MIT",
+  "keywords": [
+    "roadmap",
+    "epic",
+    "task",
+    "orchestration",
+    "setup",
+    "testing",
+    "release",
+    "qa",
+    "review",
+    "deslop",
+    "lora",
+    "lore",
+    "sanho",
+    "mulgae",
+    "gaori",
+    "podway",
+    "ouroboros",
+    "design"
+  ],
+  "skills": "./plugins/aquarium/skills/",
+  "interface": {
+    "displayName": "Aquarium",
+    "shortDescription": "Design, gate, deliver, and validate roadmap work.",
+    "longDescription": "Aquarium provides Ouroboros-assisted project and epic design, durable local Design Gates, isolated release-candidate QA, optional Podway v2 execution memory, task delivery, epic orchestration, and cold validation.",
+    "developerName": "Root Kernel",
+    "websiteURL": "https://home.rootkernel.xyz"
+  },
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "^Bash$",
+      "command": "python3 \"${KIMI_PLUGIN_ROOT}/plugins/aquarium/hooks/task_commit_gate.py\"",
+      "timeout": 5
+    }
+  ]
+}
