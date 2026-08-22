@@ -128,6 +128,10 @@ if inspection.file?
   assert(script.include?("KIMI_CODE_HOME"), "inspection must honor KIMI_CODE_HOME")
   assert(script.include?('".kimi-code/skills"'), "inspection must search the Kimi Code skill root")
   assert(script.include?("mcp.json"), "inspection must read the Kimi Code mcp.json registration")
+  assert(script.include?("load_mcp_json_entries"), "inspection must read Mulgae and Gaori registrations from mcp.json")
+  assert(script.include?("MULGAE_MCP_TOOL_TIMEOUT_MS"), "inspection must check millisecond MCP timeouts")
+  assert(!script.include?('shutil.which("codex")'), "inspection must not probe another host's CLI for MCP registrations")
+  assert(!script.include?(".codex/config.toml"), "inspection must not read another host's project configuration")
 end
 
 # --- manifests agree with upstream -----------------------------------------

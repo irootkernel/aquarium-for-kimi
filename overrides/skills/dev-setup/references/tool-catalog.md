@@ -135,15 +135,14 @@ Propose these root-anchored Git ignore rules through an exact reviewed diff:
 
 Verify that only `.mulgae/config.yaml` is trackable and that `.mulgae/local.yaml` and all runtime state remain untracked and ignored. Propose `.mulgaeignore` entries from the repository's secrets, generated output, large artifacts, agent instructions, and non-reviewable paths. A `.mulgaeignore` intended as shared capture policy may be tracked only with explicit approval.
 
-Treat MCP as an optional, separately approved project-local component. For a trusted project, merge this machine-specific entry into the repository's `.kimi-code/mcp.json` while preserving unrelated configuration:
+Treat MCP as an optional, separately approved user-global component. Merge this machine-specific entry into the user-level `mcp.json` (`$KIMI_CODE_HOME/mcp.json`, default `~/.kimi-code/mcp.json`), which Kimi Code shares across projects, while preserving unrelated entries:
 
 ```json
 {
   "mcpServers": {
     "mulgae": {
       "command": "<absolute-selected-mulgae-path>",
-      "args": ["mcp", "--project-root", "<absolute-git-root>"],
-      "cwd": "<absolute-git-root>",
+      "args": ["mcp"],
       "startupTimeoutMs": 30000,
       "toolTimeoutMs": 7501000
     }
@@ -151,9 +150,11 @@ Treat MCP as an optional, separately approved project-local component. For a tru
 }
 ```
 
-Timeout fields are milliseconds, not seconds. The 7501000 ms tool timeout is the 7501-second budget that covers the admitted two-hour review deadline plus retry and finalization margin; preserve any larger existing value.
+The flag-less argument list is load-bearing: the user-level entry serves every project, so it must not pin `--project-root` or `cwd` to one repository. Launched this way, the server resolves the enclosing repository from the session's own working directory. A same-name project-level entry in a repository's `.kimi-code/mcp.json` overrides the user entry for that project: do not create one, report an existing one as shadowing the user registration, and propose its removal only as a separately approved action.
 
-Show the complete diff and whether `.kimi-code/mcp.json` is tracked before approval, and never stage it during setup. There is no `kimi mcp` command, so verify the effective registration by reading the merged entry and running `kimi doctor` to validate the configuration: it must be an enabled stdio entry that resolves to the selected binary, binds its exact `mcp --project-root <canonical-root>` arguments and cwd to the canonical repository, and uses startup and tool timeouts at least as large as the proposed defaults. Record the configuration evidence and live status separately. A project-level stdio server triggers a workspace-trust prompt; a server still pending that trust is unverified, not a mismatch. The `/mcp` view in a running session shows live connection status.
+Timeout fields are milliseconds, not seconds. The 7501000 ms tool timeout is the 7501-second budget that covers the admitted two-hour review deadline plus retry and finalization margin; preserve any larger existing value. An absent `startupTimeoutMs` takes the documented 30000 ms default, which meets the floor; an absent `toolTimeoutMs` never covers the review budget.
+
+Show the complete diff before approval; the user-level file lives outside every repository, so nothing is staged and no workspace-trust prompt applies. There is no `kimi mcp` command, so verify the effective registration by reading the merged entry and running `kimi doctor` to validate the configuration: it must be an enabled stdio entry that resolves to the selected binary, keeps the exact flag-less `mcp` arguments with no pinned `cwd`, and uses startup and tool timeouts at least as large as the proposed defaults. Record the configuration evidence and live status separately. The `/mcp` view in a running session shows live connection status.
 
 Tell the user to restart Kimi Code or start a new session: a server added mid-session only joins new sessions, and only then can it expose `preflight_review`, `start_review`, `await_review`, `cancel_review`, the foreground-compatible `run_review`, `list_runs`, `get_run`, `list_findings`, and verified report and finding resources. The v0.1.17 lifecycle starts exactly once and awaits the same process-local invocation without transferring observer cancellation to provider execution; use the foreground path atomically when any lifecycle tool is absent. The attached MCP surface remains versioned independently; CLI fallback preflight must identify `mulgae-review-preflight.v3`.
 
@@ -171,7 +172,7 @@ Install an approved tag:
 go install github.com/irootkernel/gaori@<tag>
 ```
 
-The binary does not install the agent skill. Diagnose the CLI and repository with `command -v gaori`, `gaori version --json`, and, when `.gaori/tester.yaml` exists, `gaori --json config check`. Diagnose `use-gaori` and project-local MCP registration independently. Config check validates schema-v2 config and all stored rules without resolving executables, running commands, or creating evidence.
+The binary does not install the agent skill. Diagnose the CLI and repository with `command -v gaori`, `gaori version --json`, and, when `.gaori/tester.yaml` exists, `gaori --json config check`. Diagnose `use-gaori` and the user-global MCP registration independently. Config check validates schema-v2 config and all stored rules without resolving executables, running commands, or creating evidence.
 
 For a new user-scoped skill installation, use only these files from the automatically fetched and verified `https://raw.githubusercontent.com/irootkernel/gaori/<tag>/skills/use-gaori/` payload: `SKILL.md`, `references/lifecycle.md`, `references/authoring.md`, and `references/recovery.md`. Verify the complete file set, SHA-256 digests, and `name: use-gaori` frontmatter before atomically moving it to `~/.agents/skills/use-gaori`. Repeat every raw GitHub endpoint and the user-global target in the installation proposal even though the comparison fetch itself needs no separate approval.
 
@@ -195,21 +196,23 @@ This keeps `.gaori/toolchain.yaml`, `.gaori/rule-proposals/`, `.gaori/runs/`, an
 
 Leave completed evidence and proposal reconciliation to the matching `use-gaori` skill. Its `gaori --json runs list`, `gaori --json rules proposals`, and `gaori rules show --proposal <name>` paths are read-only discovery, not repair, activation, command reruns, or durable job recovery. Never inspect prior run contents or raw logs automatically during setup.
 
-Treat MCP as an optional, separately approved project-local component. For a trusted project, merge this machine-specific entry into the repository's `.kimi-code/mcp.json` while preserving unrelated configuration:
+Treat MCP as an optional, separately approved user-global component. Merge this machine-specific entry into the user-level `mcp.json` (`$KIMI_CODE_HOME/mcp.json`, default `~/.kimi-code/mcp.json`), which Kimi Code shares across projects, while preserving unrelated entries:
 
 ```json
 {
   "mcpServers": {
     "gaori": {
       "command": "<absolute-selected-gaori-path>",
-      "args": ["--repo", "<absolute-git-root>", "mcp"],
+      "args": ["mcp"],
       "toolTimeoutMs": 3601000
     }
   }
 }
 ```
 
-Show the complete diff and whether `.kimi-code/mcp.json` is tracked before approval. Never stage it during setup. Verify the effective registration by reading the merged entry and running `kimi doctor`; do not start the server or a test. Timeout fields are milliseconds, not seconds: require a numeric `toolTimeoutMs` of at least 3601000, the 3601-second floor, so the host deadline exceeds a one-hour command and evidence finalization, while preserving any larger existing value. Report missing or inadequate timeout, disabled, non-stdio, unresolvable-command, and wrong-repository entries as degraded; a project-level stdio server triggers a workspace-trust prompt, so report a server still pending that trust as unverified rather than degraded. Tell the user to restart Kimi Code or start a new session so it can expose `start_configured_run`, `start_ad_hoc_run`, `get_run`, `wait_run`, terminal-only `await_run`, `cancel_run`, `get_excerpt`, and the read-only `list_runs` completed-evidence inventory. `await_run` observes one process-local invocation without cancelling execution when that observer ends; use `get_run` or bounded `wait_run` when the host deadline cannot safely cover terminal completion. `list_runs` is stateless and cannot recover an invocation ID or reattach a disconnected run.
+The flag-less argument list is load-bearing: the user-level entry serves every project, so it must not pin `--repo` or `cwd` to one repository. Launched this way, the server resolves the enclosing repository from the session's own working directory. A same-name project-level entry in a repository's `.kimi-code/mcp.json` overrides the user entry for that project: do not create one, report an existing one as shadowing the user registration, and propose its removal only as a separately approved action.
+
+Show the complete diff before approval; the user-level file lives outside every repository, so nothing is staged and no workspace-trust prompt applies. Verify the effective registration by reading the merged entry and running `kimi doctor`; do not start the server or a test. Timeout fields are milliseconds, not seconds: require a numeric `toolTimeoutMs` of at least 3601000, the 3601-second floor, so the host deadline exceeds a one-hour command and evidence finalization, while preserving any larger existing value. Report missing or inadequate timeout, disabled, non-stdio, unresolvable or non-selected command, repository-bound (`--repo` or a pinned `cwd`), and shadowing project-level entries as degraded. Tell the user to restart Kimi Code or start a new session so it can expose `start_configured_run`, `start_ad_hoc_run`, `get_run`, `wait_run`, terminal-only `await_run`, `cancel_run`, `get_excerpt`, and the read-only `list_runs` completed-evidence inventory. `await_run` observes one process-local invocation without cancelling execution when that observer ends; use `get_run` or bounded `wait_run` when the host deadline cannot safely cover terminal completion. `list_runs` is stateless and cannot recover an invocation ID or reattach a disconnected run.
 
 ## Lora / Lore
 
@@ -325,13 +328,13 @@ Merge the MCP entry into the user-level `mcp.json` (`$KIMI_CODE_HOME/mcp.json`, 
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+      "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]==<exact-version>", "ouroboros", "mcp", "serve"]
     }
   }
 }
 ```
 
-The server launches as its own process through `uvx`, so `uv` must already be present. A project-level `.kimi-code/mcp.json` entry of the same name overrides the user entry for that project; do not create one here.
+The server launches as its own process through `uvx`, so `uv` must already be present. Pin `<exact-version>` to the same version resolved for the CLI installation. The `--isolated` flag and the exact `==` pin are load-bearing: an unpinned `uvx --from 'ouroboros-ai[mcp]'` reuses the `uv tool install`ed CLI environment whenever its version satisfies the spec, that environment carries MCP 1.x without the `[mcp]` extra, and the v2 server then fails at startup with `MCP SDK v2 server API unavailable`. `--python '>=3.12'` keeps the isolated environment on an interpreter the MCP 2 SDK supports. A project-level `.kimi-code/mcp.json` entry of the same name overrides the user entry for that project; do not create one here.
 
 Diagnose four independent components with the v6 inspector's explicit `--include-ouroboros` flag: `ooo --version`, the installed user-scoped skills, `ooo mcp doctor --json`, and the effective `mcp.json` registration. These probes are local and read-only: they do not contact a provider, initiate authentication, or make a network request, though the MCP doctor may inspect bounded local authentication-readiness metadata without exposing credential material. A healthy CLI does not prove that the skills are installed, that the MCP runtime is ready, or that a registration exists.
 
