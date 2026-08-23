@@ -84,6 +84,11 @@ SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
         "Ouroboros package, Codex, and runtime components",
         "Ouroboros package, host integration, and runtime components",
     ),
+    # v0.1.10 dropped the Oxford comma in the bundle skill's copy of the list.
+    (
+        "Ouroboros package, Codex and runtime components",
+        "Ouroboros package, host integration and runtime components",
+    ),
     # Lora installs per host, so the catalog's scope wording moves. The
     # instruction-file text it could collide with is handled by overrides.
     ("Configure it for Codex user-global scope.", "Configure it for the Kimi Code user-global scope."),
@@ -132,13 +137,15 @@ SCRIPT_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
 ''',
     ),
     # Upstream classifies the Ouroboros registration from a `codex mcp get`
-    # JSON probe. Kimi Code has no `mcp` CLI subcommand, so the whole
-    # classifier is replaced with one that reads the host's mcp.json files:
-    # `$KIMI_CODE_HOME/mcp.json` (user level) and `.kimi-code/mcp.json`
-    # (project level, which overrides the user entry on a name collision).
+    # JSON probe. Kimi Code has no `mcp` CLI subcommand, so the classifier is
+    # replaced with mcp.json readers that all three MCP inspections share:
+    # `$KIMI_CODE_HOME/mcp.json` (user level, shared across projects) and
+    # `.kimi-code/mcp.json` (project level, which overrides the user entry on
+    # a name collision). The Aquarium integration registers user level only;
+    # a project-level entry shadows it for that one project.
     (
         r'''def classify_ouroboros_registration(
-    raw_probe: dict[str, Any],
+    raw_probe: dict[str, Any], ouroboros_executable: str | None
 ) -> dict[str, Any]:
     probe = {
         key: raw_probe[key] for key in ("attempted", "ok", "exit_code", "timed_out")
@@ -151,12 +158,8 @@ SCRIPT_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
         probe["reason"] = "registration_probe_failed"
         return {"status": "degraded", "probe": probe}
 
-    stderr = raw_probe.get("stderr", "").strip()
     if not raw_probe["ok"]:
-        not_found = re.fullmatch(
-            r"(?:Error:\s*)?No MCP server named ['\"]?ouroboros['\"]? found\.?",
-            stderr,
-        )
+        not_found = named_mcp_server_missing(raw_probe, "ouroboros")
         probe["reason"] = (
             "registration_not_found" if not_found else "registration_probe_failed"
         )
@@ -174,8 +177,37 @@ SCRIPT_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
     if not isinstance(result, dict):
         probe["reason"] = "registration_result_invalid"
         return {"status": "degraded", "probe": probe}
-    if result.get("enabled") is True:
+    transport = result.get("transport")
+    command = transport.get("command") if isinstance(transport, dict) else None
+    args = transport.get("args") if isinstance(transport, dict) else None
+    resolved_command: Path | None = None
+    if isinstance(command, str) and command:
+        candidate = Path(command).expanduser()
+        if (
+            candidate.is_absolute()
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            resolved_command = candidate.resolve()
+        elif not candidate.is_absolute():
+            discovered = shutil.which(command)
+            if discovered:
+                resolved_command = Path(discovered).resolve()
+    registration_matches = bool(
+        result.get("name") == "ouroboros"
+        and result.get("enabled") is True
+        and isinstance(transport, dict)
+        and transport.get("type") == "stdio"
+        and args == ["mcp", "serve"]
+        and resolved_command
+        and ouroboros_executable
+        and resolved_command == Path(ouroboros_executable).resolve()
+    )
+    if registration_matches:
         return {"status": "configured", "probe": probe}
+    if result.get("enabled") is True:
+        probe["reason"] = "registration_mismatch"
+        return {"status": "degraded", "probe": probe}
     if result.get("enabled") is False:
         probe["reason"] = "registration_disabled"
     elif "enabled" not in result:
@@ -184,39 +216,115 @@ SCRIPT_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
         probe["reason"] = "registration_enabled_invalid"
     return {"status": "degraded", "probe": probe}
 ''',
-        r'''def ouroboros_mcp_registration(repository: Path) -> dict[str, Any]:
-    # Kimi Code has no `mcp get` CLI probe; registrations live in
-    # `$KIMI_CODE_HOME/mcp.json` (user level) and `.kimi-code/mcp.json`
-    # (project level, which overrides the user entry on a name collision).
+        r'''def load_mcp_json_entries(repository: Path, server: str) -> dict[str, Any]:
+    entries: dict[str, Any] = {"user": None, "project": None, "error": None}
+    kimi_home = os.environ.get("KIMI_CODE_HOME")
+    config_home = (
+        Path(kimi_home).expanduser()
+        if kimi_home
+        else Path.home().joinpath(".kimi-code")
+    )
+    sources = (
+        ("user", config_home.joinpath("mcp.json")),
+        ("project", repository.joinpath(".kimi-code/mcp.json")),
+    )
+    for level, source in sources:
+        try:
+            document = json.loads(source.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, json.JSONDecodeError):
+            entries["error"] = "registration_invalid_json"
+            return entries
+        servers = document.get("mcpServers") if isinstance(document, dict) else None
+        if isinstance(servers, dict) and isinstance(servers.get(server), dict):
+            entries[level] = servers[server]
+    return entries
+
+
+def classify_mcp_json_entry(
+    entry: dict[str, Any],
+    executable: str | None,
+    tool_timeout_ms: int,
+    startup_timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    # An mcp.json entry is a plain command vector, not a probed transport:
+    # stdio follows from a string command without a `url`, the integration
+    # stays flag-less (`["mcp"]`, no pinned `cwd`), and timeouts are
+    # millisecond fields. A missing startup timeout is tolerated; the floor
+    # applies only when the field is set.
+    resolved_command = resolve_mcp_command(entry.get("command"))
+    args = entry.get("args")
+    arguments_match = (
+        isinstance(args, list)
+        and all(isinstance(argument, str) for argument in args)
+        and args == ["mcp"]
+    )
+    tool_timeout = entry.get("toolTimeoutMs")
+    tool_supported = (
+        isinstance(tool_timeout, (int, float))
+        and not isinstance(tool_timeout, bool)
+        and tool_timeout >= tool_timeout_ms
+    )
+    startup_timeout = entry.get("startupTimeoutMs")
+    startup_supported = (
+        startup_timeout_ms is None
+        or startup_timeout is None
+        or (
+            isinstance(startup_timeout, (int, float))
+            and not isinstance(startup_timeout, bool)
+            and startup_timeout >= startup_timeout_ms
+        )
+    )
+    registration: dict[str, Any] = {
+        "status": "degraded",
+        "enabled": True,
+        "stdio": isinstance(entry.get("command"), str) and "url" not in entry,
+        "arguments_match": arguments_match,
+        "cwd_unbound": "cwd" not in entry,
+        "command_resolvable": resolved_command is not None,
+        "binary_matches_selected": bool(
+            resolved_command
+            and executable
+            and resolved_command == Path(executable).resolve()
+        ),
+        "tool_timeout_ms": tool_timeout,
+    }
+    if startup_timeout_ms is not None:
+        registration["startup_timeout_ms"] = startup_timeout
+    if (
+        registration["stdio"]
+        and arguments_match
+        and registration["cwd_unbound"]
+        and registration["binary_matches_selected"]
+        and startup_supported
+        and tool_supported
+    ):
+        registration["status"] = "configured"
+    else:
+        registration["reason"] = "registration_mismatch"
+    return registration
+
+
+def ouroboros_mcp_registration(repository: Path) -> dict[str, Any]:
     # The entry resolving at all is the registration signal; a disabled entry
-    # degrades rather than disappears.
+    # degrades rather than disappears. A project-level entry wins the name
+    # collision, so it is the effective registration when present.
     probe: dict[str, Any] = {
         "attempted": True,
         "ok": True,
         "exit_code": 0,
         "timed_out": False,
     }
-    kimi_home = os.environ.get("KIMI_CODE_HOME")
-    config_home = Path(kimi_home).expanduser() if kimi_home else Path.home().joinpath(".kimi-code")
-    sources = [config_home.joinpath("mcp.json"), repository.joinpath(".kimi-code/mcp.json")]
-    entry: Any = None
-    found = False
-    for source in sources:
-        try:
-            document = json.loads(source.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            continue
-        except (OSError, json.JSONDecodeError):
-            probe["reason"] = "registration_invalid_json"
-            return {"status": "degraded", "probe": probe}
-        servers = document.get("mcpServers") if isinstance(document, dict) else None
-        if isinstance(servers, dict) and "ouroboros" in servers:
-            entry = servers["ouroboros"]
-            found = True
-    if not found:
+    entries = load_mcp_json_entries(repository, "ouroboros")
+    if entries["error"]:
+        probe["reason"] = entries["error"]
+        return {"status": "degraded", "probe": probe}
+    entry = entries["project"] if entries["project"] is not None else entries["user"]
+    if entry is None:
         probe["reason"] = "registration_not_found"
         return {"status": "missing", "probe": probe}
-    if isinstance(entry, dict) and entry.get("enabled") is False:
+    if entry.get("enabled") is False:
         probe["reason"] = "registration_disabled"
         return {"status": "degraded", "probe": probe}
     return {"status": "configured", "probe": probe}
@@ -241,7 +349,7 @@ SCRIPT_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
             timeout_seconds,
         )
         tool["mcp_registration"] = classify_ouroboros_registration(
-            registration_raw
+            registration_raw, tool["executable"]
         )
     else:
         tool["mcp_registration"] = {
@@ -341,76 +449,92 @@ GAORI_MCP_TOOL_TIMEOUT_SEC = 3601''',
 MULGAE_MCP_STARTUP_TIMEOUT_MS = 30000
 GAORI_MCP_TOOL_TIMEOUT_MS = 3601000''',
     ),
-    # Only the Codex MCP probes below needed the Codex CLI version parser.
+    # Only the Codex MCP probes needed the Codex CLI version parser.
     (
         r'''def codex_version_from_output(output: str) -> str | None:
-    match = re.search(r"\bcodex(?:-cli)?\s+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b", output)
+    match = re.search(
+        r"\bcodex(?:-cli)?\s+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b", output
+    )
     return match.group(1) if match else None
 
 
 ''',
         r'''''',
     ),
-    # Upstream verifies the Mulgae and Gaori registrations through
-    # `codex mcp get`. On this host each registration is one user-level
-    # mcp.json entry shared across projects, so the probes read the JSON
-    # directly and require the flag-less global form: no `--project-root` or
-    # `--repo`, no pinned `cwd`, and no shadowing project-level entry.
+    # v0.1.10 moved the Mulgae and Gaori registrations behind per-scope Codex
+    # probe helpers that only the replaced inspectors call. Leaving them would
+    # ship another host's probe machinery in the generated artifact, so the
+    # whole cluster is removed. `missing_mcp_scope`, `mcp_recommendation`, and
+    # `resolve_mcp_command` stay: the mcp.json readers below reuse them.
     (
-        r'''def inspect_mulgae_mcp(
-    repository: Path, mulgae_executable: str | None, timeout_seconds: float
-) -> dict[str, Any]:
-    registration: dict[str, Any] = {
-        "status": "missing",
-        "project_config_present": repository.joinpath(".codex/config.toml").is_file(),
-        "enabled": None,
-        "stdio": None,
-        "repository_bound": None,
-        "arguments_match": None,
-        "cwd_bound": None,
-        "required": None,
-        "required_verification": "unverifiable",
-        "required_output_capability": "unknown",
-        "compatibility_reason": None,
-        "codex_version": None,
-        "command_resolvable": None,
-        "binary_matches_selected": None,
-        "startup_timeout_sec": None,
-        "tool_timeout_sec": None,
-    }
-    codex_executable = shutil.which("codex")
-    if not codex_executable:
-        registration.update(
-            {"status": "unavailable", "reason": "codex_executable_missing"}
+        r'''def named_mcp_server_missing(raw_probe: dict[str, Any], name: str) -> bool:
+    return bool(
+        raw_probe["exit_code"] == 1
+        and not raw_probe["timed_out"]
+        and not raw_probe.get("stdout", "").strip()
+        and re.fullmatch(
+            rf"\s*Error: No MCP server named (?P<quote>['\"]?){re.escape(name)}(?P=quote) found\.\s*",
+            raw_probe.get("stderr", ""),
         )
-        return registration
-    version_probe = run_command(
-        [codex_executable, "--version"], repository, timeout_seconds
     )
-    if version_probe["ok"]:
-        registration["codex_version"] = codex_version_from_output(
-            version_probe["stdout"]
-        )
-    probe = json_probe(
-        [codex_executable, "mcp", "get", "mulgae", "--json"],
-        repository,
+
+
+''',
+        r'''''',
+    ),
+    (
+        r'''def mcp_registration_probe(
+    codex_executable: str,
+    name: str,
+    cwd: Path,
+    timeout_seconds: float,
+    environment_overrides: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw = run_command(
+        [codex_executable, "mcp", "get", name, "--json"],
+        cwd,
         timeout_seconds,
+        environment_overrides,
     )
+    return raw, parse_json_probe(raw)
+
+
+''',
+        r'''''',
+    ),
+    (
+        r'''def failed_mcp_scope(
+    raw_probe: dict[str, Any], probe: dict[str, Any], name: str
+) -> dict[str, Any]:
+    if named_mcp_server_missing(raw_probe, name):
+        return missing_mcp_scope()
+    return {
+        "status": "degraded",
+        "reason": (
+            "registration_probe_timed_out"
+            if probe["timed_out"]
+            else "registration_probe_failed"
+        ),
+    }
+
+
+''',
+        r'''''',
+    ),
+    (
+        r'''def classify_mulgae_mcp_scope(
+    raw_probe: dict[str, Any],
+    probe: dict[str, Any],
+    mulgae_executable: str | None,
+    repository: Path,
+    scope: str,
+) -> dict[str, Any]:
     if not probe["ok"]:
-        if probe["exit_code"] == 1 and not probe["timed_out"]:
-            return registration
-        if probe["timed_out"] or probe.get("error_code"):
-            registration.update(
-                {"status": "degraded", "reason": "registration_probe_failed"}
-            )
-        return registration
+        return failed_mcp_scope(raw_probe, probe, "mulgae")
     result = probe.get("result")
     transport = result.get("transport") if isinstance(result, dict) else None
     if not isinstance(result, dict) or not isinstance(transport, dict):
-        registration.update(
-            {"status": "degraded", "reason": "invalid_registration_result"}
-        )
-        return registration
+        return {"status": "degraded", "reason": "invalid_registration_result"}
 
     if "required" not in result:
         required = None
@@ -423,440 +547,646 @@ GAORI_MCP_TOOL_TIMEOUT_MS = 3601000''',
         required_output_capability = "reported"
         compatibility_reason = None
     else:
-        registration.update(
-            {
-                "status": "degraded",
-                "reason": "invalid_registration_result",
-                "required_output_capability": "invalid",
-            }
-        )
-        return registration
+        return {
+            "status": "degraded",
+            "reason": "invalid_registration_result",
+            "required_output_capability": "invalid",
+        }
 
-    command = transport.get("command")
-    resolved_command: Path | None = None
-    if isinstance(command, str) and command:
-        candidate = Path(command).expanduser()
-        if candidate.is_absolute() and candidate.is_file() and os.access(candidate, os.X_OK):
-            resolved_command = candidate.resolve()
-        elif not candidate.is_absolute():
-            discovered = shutil.which(command)
-            if discovered:
-                resolved_command = Path(discovered).resolve()
-
+    resolved_command = resolve_mcp_command(transport.get("command"))
     args = transport.get("args")
-    repository_bound = False
     arguments_match = False
+    repository_bound = scope == "global"
     if isinstance(args, list) and all(isinstance(argument, str) for argument in args):
-        try:
-            configured_root = Path(args[2]).expanduser().resolve()
-            repository_bound = configured_root == repository
-            arguments_match = (
-                len(args) == 3
-                and args[0] == "mcp"
-                and args[1] == "--project-root"
-                and repository_bound
-            )
-        except (IndexError, OSError):
-            repository_bound = False
+        if scope == "global":
+            arguments_match = args == ["mcp"]
+        elif len(args) == 3 and args[:2] == ["mcp", "--project-root"]:
+            try:
+                repository_bound = Path(args[2]).expanduser().resolve() == repository
+            except OSError:
+                repository_bound = False
+            arguments_match = repository_bound
 
     raw_cwd = transport.get("cwd", result.get("cwd"))
-    try:
-        cwd_bound = isinstance(raw_cwd, str) and Path(raw_cwd).expanduser().resolve() == repository
-    except OSError:
-        cwd_bound = False
+    if scope == "global":
+        cwd_bound = raw_cwd in {None, ""}
+    else:
+        try:
+            cwd_bound = (
+                isinstance(raw_cwd, str)
+                and Path(raw_cwd).expanduser().resolve() == repository
+            )
+        except OSError:
+            cwd_bound = False
     startup_timeout = result.get("startup_timeout_sec")
     tool_timeout = result.get("tool_timeout_sec")
-    startup_supported = (
-        isinstance(startup_timeout, (int, float))
-        and not isinstance(startup_timeout, bool)
-        and startup_timeout >= 30
-    )
-    tool_supported = (
-        isinstance(tool_timeout, (int, float))
-        and not isinstance(tool_timeout, bool)
-        and tool_timeout >= MULGAE_MCP_TOOL_TIMEOUT_SEC
-    )
     binary_matches = bool(
         resolved_command
         and mulgae_executable
         and resolved_command == Path(mulgae_executable).resolve()
     )
-    registration.update(
-        {
-            "enabled": result.get("enabled") is True,
-            "stdio": transport.get("type") == "stdio",
-            "repository_bound": repository_bound,
-            "arguments_match": arguments_match,
-            "cwd_bound": cwd_bound,
-            "required": required,
-            "required_verification": required_verification,
-            "required_output_capability": required_output_capability,
-            "compatibility_reason": compatibility_reason,
-            "command_resolvable": resolved_command is not None,
-            "binary_matches_selected": binary_matches,
-            "startup_timeout_sec": startup_timeout,
-            "tool_timeout_sec": tool_timeout,
-        }
-    )
+    registration = {
+        "status": "degraded",
+        "enabled": result.get("enabled") is True,
+        "stdio": transport.get("type") == "stdio",
+        "repository_bound": repository_bound,
+        "arguments_match": arguments_match,
+        "cwd_bound": cwd_bound,
+        "required": required,
+        "required_verification": required_verification,
+        "required_output_capability": required_output_capability,
+        "compatibility_reason": compatibility_reason,
+        "command_resolvable": resolved_command is not None,
+        "binary_matches_selected": binary_matches,
+        "startup_timeout_sec": startup_timeout,
+        "tool_timeout_sec": tool_timeout,
+    }
     if (
-        registration["project_config_present"]
-        and registration["enabled"]
+        registration["enabled"]
         and registration["stdio"]
         and arguments_match
         and cwd_bound
         and required_verification in {"verified", "unverifiable"}
         and binary_matches
-        and startup_supported
-        and tool_supported
+        and finite_number(startup_timeout)
+        and startup_timeout >= 30
+        and finite_number(tool_timeout)
+        and tool_timeout >= MULGAE_MCP_TOOL_TIMEOUT_SEC
     ):
         registration["status"] = "configured"
     else:
+        registration["reason"] = "registration_mismatch"
+    return registration
+
+
+''',
+        r'''''',
+    ),
+    (
+        r'''def effective_mcp_registration(
+    name: str,
+    global_registration: dict[str, Any],
+    local_registration: dict[str, Any],
+    local_symlinked: bool,
+    effective_raw: dict[str, Any],
+    effective_probe: dict[str, Any],
+) -> tuple[str, str, str | None]:
+    if local_symlinked:
+        return "unverifiable", "unverifiable", "project_configuration_symlinked"
+    selected_scope = (
+        "local"
+        if local_registration["status"] != "missing"
+        else "global"
+        if global_registration["status"] != "missing"
+        else "none"
+    )
+    if selected_scope == "none":
+        if named_mcp_server_missing(effective_raw, name):
+            return "missing", "none", "registration_not_found"
+        if not effective_probe["ok"]:
+            return "degraded", "unverifiable", "effective_registration_probe_failed"
+        return "degraded", "unverifiable", "unexpected_effective_registration"
+
+    selected = local_registration if selected_scope == "local" else global_registration
+    if selected["status"] != "configured":
+        return selected["status"], selected_scope, selected.get("reason")
+    if not effective_probe["ok"] or effective_probe.get("result") != selected.get(
+        "_result"
+    ):
+        return "degraded", selected_scope, "effective_registration_mismatch"
+    return selected["status"], selected_scope, selected.get("reason")
+
+
+''',
+        r'''''',
+    ),
+    (
+        r'''def classify_gaori_mcp_scope(
+    raw_probe: dict[str, Any],
+    probe: dict[str, Any],
+    gaori_executable: str | None,
+    repository: Path,
+    scope: str,
+) -> dict[str, Any]:
+    if not probe["ok"]:
+        return failed_mcp_scope(raw_probe, probe, "gaori")
+    result = probe.get("result")
+    transport = result.get("transport") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or not isinstance(transport, dict):
+        return {"status": "degraded", "reason": "invalid_registration_result"}
+
+    args = transport.get("args")
+    repository_bound = scope == "global"
+    arguments_match = False
+    if isinstance(args, list) and all(isinstance(argument, str) for argument in args):
+        if scope == "global":
+            arguments_match = args == ["mcp"]
+        elif len(args) == 3 and args[0] == "--repo" and args[2] == "mcp":
+            try:
+                repository_bound = Path(args[1]).expanduser().resolve() == repository
+            except OSError:
+                repository_bound = False
+            arguments_match = repository_bound
+    raw_cwd = transport.get("cwd", result.get("cwd"))
+    cwd_unbound = raw_cwd in {None, ""}
+    resolved_command = resolve_mcp_command(transport.get("command"))
+    tool_timeout = result.get("tool_timeout_sec")
+    binary_matches = bool(
+        resolved_command
+        and gaori_executable
+        and resolved_command == Path(gaori_executable).resolve()
+    )
+    registration = {
+        "status": "degraded",
+        "enabled": result.get("enabled") is True,
+        "stdio": transport.get("type") == "stdio",
+        "repository_bound": repository_bound,
+        "arguments_match": arguments_match,
+        "cwd_unbound": cwd_unbound,
+        "command_resolvable": resolved_command is not None,
+        "binary_matches_selected": binary_matches,
+        "tool_timeout_sec": tool_timeout,
+    }
+    if (
+        registration["enabled"]
+        and registration["stdio"]
+        and arguments_match
+        and cwd_unbound
+        and binary_matches
+        and finite_number(tool_timeout)
+        and tool_timeout >= GAORI_MCP_TOOL_TIMEOUT_SEC
+    ):
+        registration["status"] = "configured"
+    else:
+        registration["reason"] = "registration_mismatch"
+    return registration
+
+
+''',
+        r'''''',
+    ),
+    # Upstream verifies the Mulgae registration through per-scope
+    # `codex mcp get` probes. On this host each registration is one user-level
+    # mcp.json entry shared across projects, with a project-level entry
+    # shadowing it for that one project, so the inspector reads the JSON
+    # directly and keeps the upstream report shape: global scope, local
+    # scope, effective scope, and a recommendation. The global entry must
+    # stay flag-less — no `--project-root` or `--repo`, no pinned `cwd`.
+    (
+        r'''def inspect_mulgae_mcp(
+    repository: Path, mulgae_executable: str | None, timeout_seconds: float
+) -> dict[str, Any]:
+    project_config_present, project_config_symlinked = safe_managed_file_state(
+        repository / ".codex" / "config.toml", repository
+    )
+    registration: dict[str, Any] = {
+        "status": "missing",
+        "preferred_scope": "global",
+        "effective_scope": "none",
+        "local_confirmation_required": None,
+        "codex_version": None,
+    }
+    codex_executable = shutil.which("codex")
+    if not codex_executable:
         registration.update(
-            {"status": "degraded", "reason": "registration_mismatch"}
+            {
+                "status": "unavailable",
+                "effective_scope": "unverifiable",
+                "reason": "codex_executable_missing",
+                "global": {"status": "unavailable"},
+                "local": {
+                    "status": "unverifiable"
+                    if project_config_symlinked
+                    else "unavailable",
+                    "project_config_present": project_config_present,
+                    "project_config_symlinked": project_config_symlinked,
+                },
+            }
         )
+        return registration
+    version_probe = run_command(
+        [codex_executable, "--version"], repository, timeout_seconds
+    )
+    if version_probe["ok"]:
+        registration["codex_version"] = codex_version_from_output(
+            version_probe["stdout"]
+        )
+    neutral_cwd = Path(repository.anchor)
+    global_raw, global_probe = mcp_registration_probe(
+        codex_executable, "mulgae", neutral_cwd, timeout_seconds
+    )
+    global_registration = classify_mulgae_mcp_scope(
+        global_raw, global_probe, mulgae_executable, repository, "global"
+    )
+    if global_probe["ok"]:
+        global_registration["_result"] = global_probe.get("result")
+
+    if project_config_symlinked:
+        local_registration = {
+            "status": "unverifiable",
+            "reason": "project_configuration_symlinked",
+        }
+    elif not project_config_present:
+        local_registration = missing_mcp_scope("project_configuration_missing")
+    else:
+        local_raw, local_probe = mcp_registration_probe(
+            codex_executable,
+            "mulgae",
+            neutral_cwd,
+            timeout_seconds,
+            {"CODEX_HOME": str(repository / ".codex")},
+        )
+        local_registration = classify_mulgae_mcp_scope(
+            local_raw, local_probe, mulgae_executable, repository, "local"
+        )
+        if local_probe["ok"]:
+            local_registration["_result"] = local_probe.get("result")
+    local_registration.update(
+        {
+            "project_config_present": project_config_present,
+            "project_config_symlinked": project_config_symlinked,
+        }
+    )
+
+    effective_raw, effective_probe = mcp_registration_probe(
+        codex_executable, "mulgae", repository, timeout_seconds
+    )
+    status, effective_scope, reason = effective_mcp_registration(
+        "mulgae",
+        global_registration,
+        local_registration,
+        project_config_symlinked,
+        effective_raw,
+        effective_probe,
+    )
+    global_registration.pop("_result", None)
+    local_registration.pop("_result", None)
+    local_confirmable = (
+        None if project_config_symlinked else local_registration["status"] != "missing"
+    )
+    registration.update(
+        {
+            "status": status,
+            "effective_scope": effective_scope,
+            "local_confirmation_required": local_confirmable,
+            "global": global_registration,
+            "local": local_registration,
+            "recommendation": (
+                "resolve_symlinked_local_configuration"
+                if project_config_symlinked
+                else mcp_recommendation(
+                    global_registration["status"],
+                    bool(local_confirmable),
+                )
+            ),
+        }
+    )
+    if reason:
+        registration["reason"] = reason
     return registration''',
-        r'''def load_mcp_json_entries(repository: Path, server: str) -> dict[str, Any]:
-    # Kimi Code has no `mcp get` CLI probe; registrations live in
-    # `$KIMI_CODE_HOME/mcp.json` (user level, shared across projects) and
-    # `.kimi-code/mcp.json` (project level, which overrides the user entry
-    # on a name collision). The Aquarium integration registers user level
-    # only; a project-level entry shadows it for that one project.
-    entries: dict[str, Any] = {"user": None, "project": None, "error": None}
-    kimi_home = os.environ.get("KIMI_CODE_HOME")
-    config_home = (
-        Path(kimi_home).expanduser()
-        if kimi_home
-        else Path.home().joinpath(".kimi-code")
-    )
-    sources = (
-        ("user", config_home.joinpath("mcp.json")),
-        ("project", repository.joinpath(".kimi-code/mcp.json")),
-    )
-    for level, source in sources:
-        try:
-            document = json.loads(source.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            continue
-        except (OSError, json.JSONDecodeError):
-            entries["error"] = "registration_invalid_json"
-            return entries
-        servers = document.get("mcpServers") if isinstance(document, dict) else None
-        if isinstance(servers, dict) and isinstance(servers.get(server), dict):
-            entries[level] = servers[server]
-    return entries
-
-
-def resolve_mcp_command(command: Any) -> Path | None:
-    if not isinstance(command, str) or not command:
-        return None
-    candidate = Path(command).expanduser()
-    if candidate.is_absolute():
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate.resolve()
-        return None
-    discovered = shutil.which(command)
-    return Path(discovered).resolve() if discovered else None
-
-
-def inspect_mulgae_mcp(
+        r'''def inspect_mulgae_mcp(
     repository: Path, mulgae_executable: str | None, timeout_seconds: float
 ) -> dict[str, Any]:
     # The Mulgae registration is one user-level mcp.json entry shared across
     # projects. It must stay flag-less — no `--project-root` and no pinned
     # `cwd` — so the launched server resolves each session's own repository.
+    # A project-level `.kimi-code/mcp.json` entry shadows the user entry for
+    # that one project and is never the recommended state.
+    project_config_present, project_config_symlinked = safe_managed_file_state(
+        repository / ".kimi-code" / "mcp.json", repository
+    )
     registration: dict[str, Any] = {
         "status": "missing",
-        "scope": "user",
-        "enabled": None,
-        "stdio": None,
-        "arguments_match": None,
-        "cwd_unbound": None,
-        "command_resolvable": None,
-        "binary_matches_selected": None,
-        "startup_timeout_ms": None,
-        "tool_timeout_ms": None,
-        "project_override_present": None,
+        "preferred_scope": "global",
+        "effective_scope": "none",
+        "local_confirmation_required": None,
     }
     entries = load_mcp_json_entries(repository, "mulgae")
-    registration["project_override_present"] = entries["project"] is not None
     if entries["error"]:
-        registration.update({"status": "degraded", "reason": entries["error"]})
-        return registration
-    entry = entries["user"]
-    if entry is None:
-        registration["reason"] = (
-            "registration_project_scoped_only"
-            if entries["project"] is not None
-            else "registration_not_found"
-        )
-        return registration
-    if entry.get("enabled") is False:
         registration.update(
             {
-                "enabled": False,
                 "status": "degraded",
-                "reason": "registration_disabled",
+                "effective_scope": "unverifiable",
+                "reason": entries["error"],
+                "global": {"status": "unverifiable"},
+                "local": {
+                    "status": "unverifiable",
+                    "project_config_present": project_config_present,
+                    "project_config_symlinked": project_config_symlinked,
+                },
             }
         )
         return registration
 
-    args = entry.get("args")
-    arguments_match = (
-        isinstance(args, list)
-        and all(isinstance(argument, str) for argument in args)
-        and args == ["mcp"]
+    user_entry = entries["user"]
+    if user_entry is None:
+        global_registration = missing_mcp_scope()
+    elif user_entry.get("enabled") is False:
+        global_registration = {
+            "status": "degraded",
+            "enabled": False,
+            "reason": "registration_disabled",
+        }
+    else:
+        global_registration = classify_mcp_json_entry(
+            user_entry,
+            mulgae_executable,
+            MULGAE_MCP_TOOL_TIMEOUT_MS,
+            MULGAE_MCP_STARTUP_TIMEOUT_MS,
+        )
+
+    project_entry = entries["project"]
+    if project_config_symlinked:
+        local_registration: dict[str, Any] = {
+            "status": "unverifiable",
+            "reason": "project_configuration_symlinked",
+        }
+    elif project_entry is None:
+        local_registration = missing_mcp_scope(
+            "registration_not_found"
+            if project_config_present
+            else "project_configuration_missing"
+        )
+    elif project_entry.get("enabled") is False:
+        local_registration = {
+            "status": "degraded",
+            "enabled": False,
+            "reason": "registration_disabled",
+        }
+    else:
+        local_registration = classify_mcp_json_entry(
+            project_entry,
+            mulgae_executable,
+            MULGAE_MCP_TOOL_TIMEOUT_MS,
+            MULGAE_MCP_STARTUP_TIMEOUT_MS,
+        )
+    local_registration.update(
+        {
+            "project_config_present": project_config_present,
+            "project_config_symlinked": project_config_symlinked,
+        }
     )
-    cwd_unbound = "cwd" not in entry
-    resolved_command = resolve_mcp_command(entry.get("command"))
-    startup_timeout = entry.get("startupTimeoutMs")
-    startup_supported = startup_timeout is None or (
-        isinstance(startup_timeout, (int, float))
-        and not isinstance(startup_timeout, bool)
-        and startup_timeout >= MULGAE_MCP_STARTUP_TIMEOUT_MS
-    )
-    tool_timeout = entry.get("toolTimeoutMs")
-    tool_supported = (
-        isinstance(tool_timeout, (int, float))
-        and not isinstance(tool_timeout, bool)
-        and tool_timeout >= MULGAE_MCP_TOOL_TIMEOUT_MS
+
+    # The scope merge is deterministic on this host — a project-level entry
+    # shadows the user-level one — so the effective registration is the
+    # selected scope itself rather than a re-probed result.
+    if project_config_symlinked:
+        status, effective_scope, reason = (
+            "unverifiable",
+            "unverifiable",
+            "project_configuration_symlinked",
+        )
+    elif local_registration["status"] != "missing":
+        status = local_registration["status"]
+        effective_scope = "local"
+        reason = local_registration.get("reason")
+    elif global_registration["status"] != "missing":
+        status = global_registration["status"]
+        effective_scope = "global"
+        reason = global_registration.get("reason")
+    else:
+        status, effective_scope, reason = "missing", "none", "registration_not_found"
+    local_confirmable = (
+        None if project_config_symlinked else local_registration["status"] != "missing"
     )
     registration.update(
         {
-            "enabled": True,
-            "stdio": isinstance(entry.get("command"), str) and "url" not in entry,
-            "arguments_match": arguments_match,
-            "cwd_unbound": cwd_unbound,
-            "command_resolvable": resolved_command is not None,
-            "binary_matches_selected": bool(
-                resolved_command
-                and mulgae_executable
-                and resolved_command == Path(mulgae_executable).resolve()
+            "status": status,
+            "effective_scope": effective_scope,
+            "local_confirmation_required": local_confirmable,
+            "global": global_registration,
+            "local": local_registration,
+            "recommendation": (
+                "resolve_symlinked_local_configuration"
+                if project_config_symlinked
+                else mcp_recommendation(
+                    global_registration["status"],
+                    bool(local_confirmable),
+                )
             ),
-            "startup_timeout_ms": startup_timeout,
-            "tool_timeout_ms": tool_timeout,
         }
     )
-    if registration["project_override_present"]:
-        registration.update(
-            {
-                "status": "degraded",
-                "reason": "project_entry_shadows_user_registration",
-            }
-        )
-    elif (
-        registration["stdio"]
-        and arguments_match
-        and cwd_unbound
-        and registration["binary_matches_selected"]
-        and startup_supported
-        and tool_supported
-    ):
-        registration["status"] = "configured"
-    else:
-        registration.update({"status": "degraded", "reason": "registration_mismatch"})
+    if reason:
+        registration["reason"] = reason
     return registration''',
     ),
     (
         r'''def inspect_gaori_mcp(
     repository: Path, gaori_executable: str | None, timeout_seconds: float
 ) -> dict[str, Any]:
-    project_config = repository.joinpath(".codex/config.toml")
-    project_config_present = project_config.is_file()
+    project_config_present, project_config_symlinked = safe_managed_file_state(
+        repository / ".codex" / "config.toml", repository
+    )
     registration: dict[str, Any] = {
         "status": "missing",
-        "project_config_present": project_config_present,
-        "enabled": None,
-        "stdio": None,
-        "repository_bound": None,
-        "command_resolvable": None,
-        "binary_matches_selected": None,
-        "tool_timeout_sec": None,
+        "preferred_scope": "global",
+        "effective_scope": "none",
+        "local_confirmation_required": None,
     }
     codex_executable = shutil.which("codex")
     if not codex_executable:
-        registration["status"] = "unavailable"
-        registration["reason"] = "codex_executable_missing"
-        return registration
-
-    probe = json_probe(
-        [codex_executable, "mcp", "get", "gaori", "--json"],
-        repository,
-        timeout_seconds,
-    )
-    if not probe["ok"]:
-        if project_config_present:
-            registration["status"] = "degraded"
-            registration["reason"] = (
-                "registration_probe_timed_out"
-                if probe["timed_out"]
-                else "project_registration_inactive_or_invalid"
-            )
-        return registration
-
-    result = probe.get("result")
-    if not isinstance(result, dict):
         registration.update(
-            {"status": "degraded", "reason": "invalid_registration_result"}
+            {
+                "status": "unavailable",
+                "effective_scope": "unverifiable",
+                "reason": "codex_executable_missing",
+                "global": {"status": "unavailable"},
+                "local": {
+                    "status": "unverifiable"
+                    if project_config_symlinked
+                    else "unavailable",
+                    "project_config_present": project_config_present,
+                    "project_config_symlinked": project_config_symlinked,
+                },
+            }
         )
         return registration
 
-    transport = result.get("transport")
-    if not isinstance(transport, dict):
-        registration.update(
-            {"status": "degraded", "reason": "missing_registration_transport"}
-        )
-        return registration
-
-    enabled = result.get("enabled") is True
-    stdio = transport.get("type") == "stdio"
-    command = transport.get("command")
-    args = transport.get("args")
-    resolved_command: Path | None = None
-    if isinstance(command, str) and command:
-        candidate = Path(command).expanduser()
-        if (
-            candidate.is_absolute()
-            and candidate.is_file()
-            and os.access(candidate, os.X_OK)
-        ):
-            resolved_command = candidate.resolve()
-        elif not candidate.is_absolute():
-            discovered = shutil.which(command)
-            if discovered:
-                resolved_command = Path(discovered).resolve()
-
-    repository_bound = False
-    server_mode = False
-    if isinstance(args, list) and all(isinstance(argument, str) for argument in args):
-        try:
-            repo_index = args.index("--repo")
-            configured_repository = Path(args[repo_index + 1]).expanduser().resolve()
-            repository_bound = configured_repository == repository
-        except (ValueError, IndexError, OSError):
-            repository_bound = False
-        server_mode = bool(args and args[-1] == "mcp")
-
-    tool_timeout = result.get("tool_timeout_sec")
-    timeout_supported = (
-        isinstance(tool_timeout, (int, float))
-        and not isinstance(tool_timeout, bool)
-        and tool_timeout >= GAORI_MCP_TOOL_TIMEOUT_SEC
+    neutral_cwd = Path(repository.anchor)
+    global_raw, global_probe = mcp_registration_probe(
+        codex_executable, "gaori", neutral_cwd, timeout_seconds
     )
-    binary_matches = bool(
-        resolved_command
-        and gaori_executable
-        and resolved_command == Path(gaori_executable).resolve()
+    global_registration = classify_gaori_mcp_scope(
+        global_raw, global_probe, gaori_executable, repository, "global"
+    )
+    if global_probe["ok"]:
+        global_registration["_result"] = global_probe.get("result")
+
+    if project_config_symlinked:
+        local_registration = {
+            "status": "unverifiable",
+            "reason": "project_configuration_symlinked",
+        }
+    elif not project_config_present:
+        local_registration = missing_mcp_scope("project_configuration_missing")
+    else:
+        local_raw, local_probe = mcp_registration_probe(
+            codex_executable,
+            "gaori",
+            neutral_cwd,
+            timeout_seconds,
+            {"CODEX_HOME": str(repository / ".codex")},
+        )
+        local_registration = classify_gaori_mcp_scope(
+            local_raw, local_probe, gaori_executable, repository, "local"
+        )
+        if local_probe["ok"]:
+            local_registration["_result"] = local_probe.get("result")
+    local_registration.update(
+        {
+            "project_config_present": project_config_present,
+            "project_config_symlinked": project_config_symlinked,
+        }
+    )
+
+    effective_raw, effective_probe = mcp_registration_probe(
+        codex_executable, "gaori", repository, timeout_seconds
+    )
+    status, effective_scope, reason = effective_mcp_registration(
+        "gaori",
+        global_registration,
+        local_registration,
+        project_config_symlinked,
+        effective_raw,
+        effective_probe,
+    )
+    global_registration.pop("_result", None)
+    local_registration.pop("_result", None)
+    local_confirmable = (
+        None if project_config_symlinked else local_registration["status"] != "missing"
     )
     registration.update(
         {
-            "enabled": enabled,
-            "stdio": stdio,
-            "repository_bound": repository_bound,
-            "command_resolvable": resolved_command is not None,
-            "binary_matches_selected": binary_matches,
-            "tool_timeout_sec": tool_timeout,
+            "status": status,
+            "effective_scope": effective_scope,
+            "local_confirmation_required": local_confirmable,
+            "global": global_registration,
+            "local": local_registration,
+            "recommendation": (
+                "resolve_symlinked_local_configuration"
+                if project_config_symlinked
+                else mcp_recommendation(
+                    global_registration["status"],
+                    bool(local_confirmable),
+                )
+            ),
         }
     )
-    if (
-        project_config_present
-        and enabled
-        and stdio
-        and repository_bound
-        and server_mode
-        and resolved_command is not None
-        and timeout_supported
-    ):
-        registration["status"] = "configured"
-    else:
-        registration["status"] = "degraded"
-        registration["reason"] = "registration_mismatch"
+    if reason:
+        registration["reason"] = reason
     return registration''',
         r'''def inspect_gaori_mcp(
     repository: Path, gaori_executable: str | None, timeout_seconds: float
 ) -> dict[str, Any]:
     # Same shape as the Mulgae registration: one flag-less user-level entry,
     # verified from mcp.json rather than through another host's CLI probe.
+    project_config_present, project_config_symlinked = safe_managed_file_state(
+        repository / ".kimi-code" / "mcp.json", repository
+    )
     registration: dict[str, Any] = {
         "status": "missing",
-        "scope": "user",
-        "enabled": None,
-        "stdio": None,
-        "arguments_match": None,
-        "cwd_unbound": None,
-        "command_resolvable": None,
-        "binary_matches_selected": None,
-        "tool_timeout_ms": None,
-        "project_override_present": None,
+        "preferred_scope": "global",
+        "effective_scope": "none",
+        "local_confirmation_required": None,
     }
     entries = load_mcp_json_entries(repository, "gaori")
-    registration["project_override_present"] = entries["project"] is not None
     if entries["error"]:
-        registration.update({"status": "degraded", "reason": entries["error"]})
-        return registration
-    entry = entries["user"]
-    if entry is None:
-        registration["reason"] = (
-            "registration_project_scoped_only"
-            if entries["project"] is not None
-            else "registration_not_found"
-        )
-        return registration
-    if entry.get("enabled") is False:
         registration.update(
             {
-                "enabled": False,
                 "status": "degraded",
-                "reason": "registration_disabled",
+                "effective_scope": "unverifiable",
+                "reason": entries["error"],
+                "global": {"status": "unverifiable"},
+                "local": {
+                    "status": "unverifiable",
+                    "project_config_present": project_config_present,
+                    "project_config_symlinked": project_config_symlinked,
+                },
             }
         )
         return registration
 
-    args = entry.get("args")
-    arguments_match = (
-        isinstance(args, list)
-        and all(isinstance(argument, str) for argument in args)
-        and args == ["mcp"]
+    user_entry = entries["user"]
+    if user_entry is None:
+        global_registration = missing_mcp_scope()
+    elif user_entry.get("enabled") is False:
+        global_registration = {
+            "status": "degraded",
+            "enabled": False,
+            "reason": "registration_disabled",
+        }
+    else:
+        global_registration = classify_mcp_json_entry(
+            user_entry, gaori_executable, GAORI_MCP_TOOL_TIMEOUT_MS
+        )
+
+    project_entry = entries["project"]
+    if project_config_symlinked:
+        local_registration: dict[str, Any] = {
+            "status": "unverifiable",
+            "reason": "project_configuration_symlinked",
+        }
+    elif project_entry is None:
+        local_registration = missing_mcp_scope(
+            "registration_not_found"
+            if project_config_present
+            else "project_configuration_missing"
+        )
+    elif project_entry.get("enabled") is False:
+        local_registration = {
+            "status": "degraded",
+            "enabled": False,
+            "reason": "registration_disabled",
+        }
+    else:
+        local_registration = classify_mcp_json_entry(
+            project_entry, gaori_executable, GAORI_MCP_TOOL_TIMEOUT_MS
+        )
+    local_registration.update(
+        {
+            "project_config_present": project_config_present,
+            "project_config_symlinked": project_config_symlinked,
+        }
     )
-    cwd_unbound = "cwd" not in entry
-    resolved_command = resolve_mcp_command(entry.get("command"))
-    tool_timeout = entry.get("toolTimeoutMs")
-    timeout_supported = (
-        isinstance(tool_timeout, (int, float))
-        and not isinstance(tool_timeout, bool)
-        and tool_timeout >= GAORI_MCP_TOOL_TIMEOUT_MS
+
+    if project_config_symlinked:
+        status, effective_scope, reason = (
+            "unverifiable",
+            "unverifiable",
+            "project_configuration_symlinked",
+        )
+    elif local_registration["status"] != "missing":
+        status = local_registration["status"]
+        effective_scope = "local"
+        reason = local_registration.get("reason")
+    elif global_registration["status"] != "missing":
+        status = global_registration["status"]
+        effective_scope = "global"
+        reason = global_registration.get("reason")
+    else:
+        status, effective_scope, reason = "missing", "none", "registration_not_found"
+    local_confirmable = (
+        None if project_config_symlinked else local_registration["status"] != "missing"
     )
     registration.update(
         {
-            "enabled": True,
-            "stdio": isinstance(entry.get("command"), str) and "url" not in entry,
-            "arguments_match": arguments_match,
-            "cwd_unbound": cwd_unbound,
-            "command_resolvable": resolved_command is not None,
-            "binary_matches_selected": bool(
-                resolved_command
-                and gaori_executable
-                and resolved_command == Path(gaori_executable).resolve()
+            "status": status,
+            "effective_scope": effective_scope,
+            "local_confirmation_required": local_confirmable,
+            "global": global_registration,
+            "local": local_registration,
+            "recommendation": (
+                "resolve_symlinked_local_configuration"
+                if project_config_symlinked
+                else mcp_recommendation(
+                    global_registration["status"],
+                    bool(local_confirmable),
+                )
             ),
-            "tool_timeout_ms": tool_timeout,
         }
     )
-    if registration["project_override_present"]:
-        registration.update(
-            {
-                "status": "degraded",
-                "reason": "project_entry_shadows_user_registration",
-            }
-        )
-    elif (
-        registration["stdio"]
-        and arguments_match
-        and cwd_unbound
-        and registration["binary_matches_selected"]
-        and timeout_supported
-    ):
-        registration["status"] = "configured"
-    else:
-        registration.update({"status": "degraded", "reason": "registration_mismatch"})
+    if reason:
+        registration["reason"] = reason
     return registration''',
     ),
     # The repository's configuration inventory no longer lists another host's
@@ -894,7 +1224,7 @@ REQUIRED_TEXT: tuple[tuple[str, str], ...] = (
     ("plugins/aquarium/skills/dev-setup/scripts/inspect_tools.py", "doctor_checks_failed"),
     ("plugins/aquarium/skills/dev-setup/scripts/inspect_tools.py", "load_mcp_json_entries"),
     ("plugins/aquarium/skills/dev-setup/scripts/inspect_tools.py", "MULGAE_MCP_TOOL_TIMEOUT_MS"),
-    ("plugins/aquarium/skills/dev-setup/scripts/inspect_tools.py", "project_override_present"),
+    ("plugins/aquarium/skills/dev-setup/scripts/inspect_tools.py", "classify_mcp_json_entry"),
     ("plugins/aquarium/hooks/task_commit_gate.py", "/skill:task-commit"),
     (".kimi-plugin/plugin.json", "${KIMI_PLUGIN_ROOT}/plugins/aquarium/hooks/task_commit_gate.py"),
 )

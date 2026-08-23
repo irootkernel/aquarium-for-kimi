@@ -18,7 +18,7 @@ Explicit invocation authorizes dispatching one or more read-only reviewer subage
 
 ## Dispatch Fresh Reviewers
 
-Dispatch at least one reviewer subagent through the host's `Agent` tool, and dispatch several when the target spans distinct review dimensions. Use the read-only `explore` subagent type for every reviewer. Give each reviewer a distinct lens — requirements conformance, implementation correctness, test and coverage adequacy — so that additional reviewers buy coverage rather than repetition. Launch them in a single message so they run concurrently, and record which lens each one received.
+Dispatch at least one reviewer subagent through the host's `Agent` tool, and dispatch several when the target spans distinct review dimensions. Use the read-only `explore` subagent type for every reviewer. Give each reviewer a distinct lens — requirements conformance, implementation correctness, test and coverage adequacy — so that additional reviewers buy coverage rather than repetition. Launch them in a single message with `run_in_background` so they run concurrently, and record which lens each one received. Honor an explicitly requested reviewer model or effort only when the subagent mechanism exposes that selection; when it does not, record the unhonored request and report it with the result.
 
 State the read-only constraint in each specification as well, so it stands as an explicit requirement rather than relying on the subagent type alone.
 
@@ -44,9 +44,13 @@ A reviewer subagent shares the coordinator's model, so what this buys is a fresh
 
 ## Supervise and Settle
 
-Wait for each dispatched reviewer to report rather than predicting its result, and give the user a progress update while waiting. Answer reviewer questions only from established repository facts; ask the user when an answer requires product intent or wider authority.
+Before dispatch, disclose and record one cumulative liveness budget, using 30 minutes unless the user explicitly selected another duration. Wait on the background reviewers with `WaitFor` in rolling intervals, keeping each wait short enough to provide a user update at least once per minute and charging every wait against the same remaining budget.
 
-Process every returned review in full. Keep technical review evidence and dispatch status as separate statuses, so a reviewer that never ran is never read as a clean verdict.
+Treat a wait timeout inside that budget as a liveness checkpoint, not a failure. Answer reviewer questions only from established repository facts; ask the user when an answer requires product intent or wider authority.
+
+When the cumulative budget expires before every reviewer has reported, inspect each outstanding task's state once through `TaskList` and `TaskOutput`, stop waiting, leave any running reviewer intact, and report the review as operationally incomplete with the exact task IDs and their statuses. Further waiting or cancellation requires an explicit user request; never stop, retry, or replace a running reviewer automatically.
+
+Process every returned review in full. The host delivers a finished task's result exactly once, so settlement is processing that result once and recording the verdict; there is no acknowledgement protocol to drain and no settled worker to release. Never stop a running reviewer after a wait timeout, and never dispatch a duplicate reviewer for the same lens while its first dispatch is still running. Keep technical review evidence and dispatch status as separate statuses, so a reviewer that never reported is never read as a clean verdict.
 
 ## Adjudicate the Result
 
@@ -60,4 +64,4 @@ When several reviewers ran, merge overlapping findings once and keep disagreemen
 
 Do not implement a proposed response. If every reviewer returned `APPROVE`, first confirm that each examined the intended snapshot and authority, then report that no actionable feedback was found. If output is missing, scope is wrong, or dispatch failed, report the operational gap without a clean verdict.
 
-Return the target and snapshot, how many reviewers ran and with which lens, each reviewer's verdict, adjudicated findings, and recommended responses.
+Return the target and snapshot, how many reviewers ran and with which lens, each reviewer's verdict, adjudicated findings, recommended responses, and a separate dispatch status for every reviewer.
