@@ -1,7 +1,6 @@
 ---
 name: orca-review
 description: "Use when you want a supervised provider review. Not available on Kimi Code; use /skill:independent-review for supervised independent reviews instead."
-disable-model-invocation: true
 ---
 
 # Orca Review

@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Task Close
 
-Close only the reviewed task established by `/skill:task-handler`. When invoked directly, require the repository, roadmap path, task ID, final task diff, verification summary, documentation state, and complete Mulgae evidence. This phase owns completion evidence and lifecycle selection; `/skill:task-commit` owns any actual commit.
+Close only the reviewed task established by `/skill:task-handler`. When invoked directly, require the repository, roadmap path, task ID, final task diff, verification summary, documentation state, and complete Mulgae evidence. Read [evidence-residency.md](../../references/evidence-residency.md). This phase owns completion evidence and lifecycle selection; `/skill:task-commit` owns any actual commit.
 
 ## Assemble Existing Evidence
 
@@ -15,6 +15,8 @@ Determine whether repository authority makes an authorized commit, publication, 
 Assemble evidence already produced by the agent and explicitly supplied by the user. Do not rerun user-confirmed tests or documentation checks solely to mark the task complete or prepare a commit. Repository-required hooks, generators, and synchronization commands still apply when they cannot be waived; disclose and report them separately.
 
 Confirm that approved requirements, applicable verification, deslop, optimization, durable documentation, Mulgae review, and finding dispositions are represented in the final task evidence. Do not invent a terminal state when the roadmap lacks one.
+
+Keep final evidence in the orchestration report and native runtime. Do not add a completion log or validation record to the roadmap, and never treat an ignored runtime path or run ID as durable documentation.
 
 ## Select the Terminal Status
 
@@ -42,6 +44,8 @@ Only after all three answers are affirmative, apply the exact approved status ed
 
 For `Approve and close without commit`, do not stage or commit anything. Verify the task is terminal while the complete task-owned diff remains uncommitted. This path is unavailable when repository authority requires a commit for completion.
 
-For `Approve and commit`, invoke `/skill:task-commit` with a closeout handoff naming the repository, canonical roadmap path, exact task ID, approved terminal status edit, exact commit scope, verification and Mulgae evidence, and the user's one-commit authorization. Do not stage or commit independently. The handoff grants no amend, push, PR, release, or unrelated staging authority.
+For `Approve and commit`, invoke `/skill:task-commit` with a closeout handoff naming the repository, canonical roadmap path, exact task ID, approved terminal status edit, exact commit scope, the documented `entry`, `intentional no-note`, or `not-enrolled` release-note decision, verification and Mulgae evidence, zero or more approved promoted manifest path and digest pairs plus their owning-workflow native validation results or their explicit absence, and the user's one-commit authorization.
 
-Return the three answers, final roadmap state, selected terminal status, mandatory commands and exit codes, task-commit result and commit identifier when created, publication state, and remaining gaps to the orchestrator.
+Do not stage or commit independently. The handoff grants no amend, push, PR, release, or unrelated staging authority.
+
+Return the three answers, final roadmap state, selected terminal status, release-note target and decision, mandatory commands and exit codes, task-commit result and commit identifier when created, publication state, and remaining gaps to the orchestrator.

@@ -1,28 +1,34 @@
 ---
 name: independent-review
-description: "Run one or more supervised, read-only requirements and code reviews with fresh reviewer subagents in the current worktree, then adjudicate their findings and propose responses without making changes. Use when the user explicitly invokes /skill:independent-review with exactly one epic or task and asks to receive the independent review result."
+description: "Run one or more supervised, read-only requirements and code reviews with fresh reviewer subagents against staged changes, a commit or range, one task or epic, or a roadmap-independent investigation. Use when the user explicitly invokes /skill:independent-review and asks for an independent verdict without remediation."
 ---
 
 # Independent Review
 
-Coordinate one or more fresh read-only reviewer subagents in the current worktree, preserve the current checkout, and independently verify the returned findings before recommending any response. This is a standalone review workflow, not the Mulgae phase owned by `/skill:task-review`.
+Coordinate one or more fresh read-only reviewer subagents in the current worktree, preserve the current checkout, and independently verify the returned findings before recommending any response. The current execution backend is Kimi Code's native `Agent` mechanism; target selection and review semantics are backend-independent. This is a standalone review workflow, not the Mulgae phase owned by `/skill:task-review`.
 
-## Establish the Review Contract
+## Load the Contract
 
-1. Require exactly one epic or task identifier and one current Git repository. Resolve the repository root, applicable instruction files, and the authoritative roadmap, requirements, specifications, decisions, and contracts for that identifier.
-2. Inspect HEAD, branch, upstream, staged, unstaged, untracked, and conflicted state. Define the exact review snapshot and distinguish target-owned changes from unrelated work. Include committed, staged, and unstaged target code when applicable; never expose unrelated untracked content merely because it is present.
-3. Treat the user's statement that tests passed as context. Do not rerun tests, generators, formatters, linters, provider reviews, or other validation commands in either the coordinator or a reviewer.
-4. If the target authority or review boundary cannot be established safely, ask one focused question and do not dispatch a reviewer until the ambiguity is resolved.
+1. Read [review-contract.md](../../references/review-contract.md) completely. It owns target selection, dirty-state handling, consent, static-review limits, and the result envelope.
+2. Resolve this skill directory. The upstream `scripts/inspect_review_target.py` has no Kimi Code counterpart, so classify the target manually from repository evidence rather than invoking it.
 
-Explicit invocation authorizes dispatching one or more read-only reviewer subagents in the current worktree. It does not authorize source edits, staging, commits, pushes, worktree creation, destructive actions, Mulgae, or remediation.
+## Establish the Request
+
+1. Resolve one current Git root and classify the request as `staged`, `commit`, `range`, `task`, `epic`, or `special request`.
+2. For a task or epic, inspect its roadmap and linked authority first. Select a Git target automatically only when the authority identifies one unambiguous staged candidate, commit, or range; otherwise ask the user to choose among the concrete candidates.
+3. For a special request, establish the exact question, then always ask the user to confirm staged, `HEAD`, one commit, or one explicit two-dot or three-dot range.
+4. Inspect HEAD, branch, upstream, staged, unstaged, untracked, ignored, and conflicted state. Resolve any staged-target dirty decision exactly as the shared contract requires. Never review dirty working-tree content as a target.
+5. Bind the resolved target, authority paths, and exact included and excluded state to each reviewer specification.
+
+Explicit invocation with an exact target and reviewer subagent authorizes the source transmission needed for this review. Do not ask for duplicate approval unless the target, included paths, reviewer model, or execution scope changes. The workflow authorizes no source edits, tests, builds, generators, formatters, linters, provider reviews, commits, pushes, publication, or remediation. The only permitted mutation is exact-path staging that the user separately approved under the dirty decision.
 
 ## Dispatch Fresh Reviewers
 
 Dispatch at least one reviewer subagent through the host's `Agent` tool, and dispatch several when the target spans distinct review dimensions. Use the read-only `explore` subagent type for every reviewer. Give each reviewer a distinct lens — requirements conformance, implementation correctness, test and coverage adequacy — so that additional reviewers buy coverage rather than repetition. Launch them in a single message with `run_in_background` so they run concurrently, and record which lens each one received. Honor an explicitly requested reviewer model or effort only when the subagent mechanism exposes that selection; when it does not, record the unhonored request and report it with the result.
 
-State the read-only constraint in each specification as well, so it stands as an explicit requirement rather than relying on the subagent type alone.
+Do not reuse an existing terminal and do not create another Git worktree.
 
-Build each specification from source evidence, including the absolute repository, target identifier, authority paths, exact review snapshot or range, relevant staged and unstaged state, and the fact that tests already passed. Do not include the coordinator's suspected findings or intended fixes.
+Build each specification from source evidence, including the absolute repository, target identifier, authority paths, exact review snapshot or range, relevant staged and unstaged state, and the fact that tests already passed. Include the same-user visibility disclosure when dirty content is excluded. Include instructions to use index blobs for staged targets and resolved commit blobs for commit, range, or `HEAD` targets rather than later working-tree copies. Include the static-only restrictions and `runtime unverified` requirement from the shared contract, plus the required finding fields and exact `APPROVE` condition. Do not include the coordinator's suspected findings or intended fixes.
 
 Require each reviewer to:
 
@@ -64,4 +70,4 @@ When several reviewers ran, merge overlapping findings once and keep disagreemen
 
 Do not implement a proposed response. If every reviewer returned `APPROVE`, first confirm that each examined the intended snapshot and authority, then report that no actionable feedback was found. If output is missing, scope is wrong, or dispatch failed, report the operational gap without a clean verdict.
 
-Return the target and snapshot, how many reviewers ran and with which lens, each reviewer's verdict, adjudicated findings, recommended responses, and a separate dispatch status for every reviewer.
+Return the complete shared result envelope, the target and snapshot, how many reviewers ran and with which lens, each reviewer's verdict, adjudicated findings, recommended responses, and a separate dispatch status for every reviewer.

@@ -4,6 +4,12 @@ Aquarium development skills packaged as a Kimi Code plugin. This repository is a
 
 By [Root Kernel](https://home.rootkernel.xyz) · Support: [cs@rootkernel.xyz](mailto:cs@rootkernel.xyz)
 
+## Aquarium Editions
+
+- [Aquarium for Claude](https://github.com/irootkernel/aquarium-for-claude)
+- [Aquarium for Kimi](https://github.com/irootkernel/aquarium-for-kimi)
+- [Aquarium for GLM](https://github.com/irootkernel/aquarium-glm)
+
 ## Install
 
 ```
