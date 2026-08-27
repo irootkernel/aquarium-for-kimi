@@ -28,14 +28,15 @@ The generated plugin is committed, so installation never depends on the submodul
 | `new-feature` | Shape one feature epic and its Design Gate impact for an existing project. | `/skill:new-feature` |
 | `refactor` | Shape one refactor epic with compatibility, migration, rollback, and gate impact. | `/skill:refactor` |
 | `war-room` | Diagnose one difficult bug and propose a task, epic, or incomplete investigation without a fix. | `/skill:war-room` |
-| `design-qa` | Create, change, reactivate, or retire durable local Design Gates behind an approved exact diff. | `/skill:design-qa` |
 | `epic-handler` | Orchestrate an epic through sequential task goals and a convergent epic-wide audit. | `/skill:epic-handler` with a roadmap path and one epic ID |
 | `epic-validator` | Cold-validate a completed epic and converge confirmed gaps through remediation goals. | `/skill:epic-validator` with a roadmap path and one epic ID |
 | `task-handler` | Strengthen the procedure around one task goal through focused phase skills and verified transitions. | `/skill:task-handler` with a roadmap path and one task ID |
 | `task-commit` | Reconcile roadmap task lifecycle state and create one authorized commit that preserves unrelated work. | Automatic for commit requests, or `/skill:task-commit` |
 | `release-qa` | Exercise the current release candidate through read-only user scenarios covering every change since the previous stable release. | `/skill:release-qa` with an intended or confirmed version |
+| `release-handler` | Orchestrate one stable release lifecycle through publication gates and cumulative release-candidate QA. | `/skill:release-handler` with an intended or confirmed version |
 | `dev-setup` | Diagnose and configure selected development tools, and propose reference-based instruction-file guidance behind separate approvals. | `/skill:dev-setup` |
 | `dev-setup-bundle` | Apply development-tool setup to explicit Git repositories from one external YAML manifest. | `/skill:dev-setup-bundle` with a manifest path |
+| `docs-setup` | Audit, establish, adopt, or migrate canonical documentation structure and roadmap IDs. | `/skill:docs-setup` |
 | `test-setup` | Audit, propose, and configure the common Make or Bun testing contract for one repository, including evidence-backed legacy waivers. | `/skill:test-setup` |
 | `independent-review` | Run a supervised read-only requirements and code review with fresh reviewer subagents, then adjudicate their findings. | `/skill:independent-review` with one epic or task |
 | `orca-review` | Review an exact repository snapshot through a user-selected installed AI CLI in Orca, supervised through a bounded multi-agent hierarchy. | `/skill:orca-review` |
@@ -53,6 +54,10 @@ The plugin manifest declares a `PreToolUse` hook that inspects `Bash` commands a
 Every skill except `task-commit` carries `disable-model-invocation: true`, so the model cannot start it on its own; you invoke it with `/skill:<name>`. Several of these skills stage, commit, or mutate roadmap state, and the upstream workflow requires explicit invocation. The flag is derived from each upstream skill's `agents/openai.yaml` at sync time, so it can never disagree with the Codex policy. Kimi Code accepts the kebab-case key as an alias of `disableModelInvocation`.
 
 This is also why the plugin is a separate artifact rather than a second manifest in the upstream repository: Codex's plugin validator rejects `disable-model-invocation` outright, while Kimi Code needs it for the same guarantee.
+
+### Using Kimi Code goal mode
+
+`epic-handler`, `task-handler`, and `war-room` describe multi-step, evidence-gated workflows. On Kimi Code you can wrap one of these skills in a `/goal` to run the bounded autonomous phase: start the skill explicitly, let it produce a plan, and when the plan is approved create a goal with the exact repository, roadmap path, task/epic ID, and mode. The skill itself remains the authority; goal mode only gives it a bounded liveness budget and structured continuation. Do not use `/goal` for skills that are gated against model invocation — invoke those directly with `/skill:<name>`.
 
 ## How generation works
 
@@ -73,7 +78,7 @@ plugins/aquarium/                generated output, committed
 
 `sync.py` copies the upstream plugin, applies literal substitutions, applies overrides, then derives invocation gating from the upstream sidecars and drops them. It refuses to run against an empty submodule, refuses to run when upstream grows a directory the transformation does not handle, and fails if host-specific text survives.
 
-Four files diverge semantically and are kept as overrides rather than substitutions:
+Files that diverge semantically are kept as overrides rather than substitutions:
 
 | Override | Why |
 |---|---|
@@ -81,8 +86,11 @@ Four files diverge semantically and are kept as overrides rather than substituti
 | `skills/dev-setup/SKILL.md` | Resolves the instruction-file target to `AGENTS.md`, which Kimi Code reads natively; upstream's CLAUDE.md delegation proposal does not apply to this host and is dropped. The two-stage approval gate is unchanged. |
 | `skills/dev-setup/references/agents-guidance.md` | The whole file is instruction-file editing guidance, which is exactly what differs per host; the override targets AGENTS.md alone and omits the CLAUDE.md delegation template. |
 | `skills/dev-setup/references/tool-catalog.md` | Registers Mulgae, Gaori, and Ouroboros MCP servers in the user-level `mcp.json` (`$KIMI_CODE_HOME/mcp.json`, shared across projects) with millisecond `startupTimeoutMs`/`toolTimeoutMs` fields, and verifies them by reading the effective configuration plus `kimi doctor`, because Kimi Code has no `mcp get` CLI probe. |
+| `skills/dev-setup/scripts/inspect_tools.py` | The upstream inspector probes Codex CLI registrations (`codex mcp get`) and Codex-specific Ouroboros launchers. The override reads Kimi Code's `mcp.json` files directly, resolves Kimi Code skill roots, and diagnoses Ouroboros, Mulgae, and Gaori registrations against this host. |
+| `skills/orca-review/SKILL.md` | Orca is not available on Kimi Code; replaced with a short redirect to `/skill:independent-review`. |
+| `references/orca-supervision.md` | Documents the Orca backend that Kimi Code does not use; replaced with a note that `/skill:independent-review` uses Kimi Code's native subagent mechanism. |
 
-Everything else is a literal substitution: the `$aquarium:` sigil becomes `/skill:`, the `$use-*` skill sigils become `/skill:use-*`, the Ouroboros sigils `$interview`, `$pm`, `$seed`, and `$qa` become `/skill:*` because Ouroboros installs user-scoped skills that Kimi Code reads natively from `~/.agents/skills`, the separately installed `$deslop` becomes `/skill:deslop`, `request_user_input` becomes `AskUserQuestion`, `Codex goal` becomes `Kimi Code goal`, and the inspection script resolves skills from the Kimi Code roots — `KIMI_CODE_HOME`, `~/.kimi-code/skills`, and the shared `~/.agents/skills` — and diagnoses Ouroboros against this host instead of Codex.
+Everything else is a literal substitution: the `$aquarium:` sigil becomes `/skill:`, the `$use-*` skill sigils become `/skill:use-*`, the maintainer `$create-podway-procedure` sigil becomes `/skill:create-podway-procedure`, the Ouroboros sigils `$interview`, `$pm`, `$seed`, and `$qa` become `/skill:*` because Ouroboros installs user-scoped skills that Kimi Code reads natively from `~/.agents/skills`, the separately installed `$deslop` becomes `/skill:deslop`, `request_user_input` becomes `AskUserQuestion`, `Codex goal` becomes `Kimi Code goal`, and the inspection script resolves skills from the Kimi Code roots — `KIMI_CODE_HOME`, `~/.kimi-code/skills`, and the shared `~/.agents/skills` — and diagnoses Ouroboros against this host instead of Codex.
 
 The hook declaration moves from the Codex/Claude `hooks/hooks.json` shape into the manifest's flat `hooks` array, because Kimi Code does not auto-load a hooks file. Its command resolves `${KIMI_PLUGIN_ROOT}` instead of Codex's `${PLUGIN_ROOT}` and gains a `plugins/aquarium` prefix, because the installed plugin root is this repository while the script lives in the generated tree. That substitution is load-bearing: `PLUGIN_ROOT` is unset under Kimi Code, so the unsubstituted command expands to `/hooks/task_commit_gate.py`, `python3` exits 2, and `PreToolUse` reads exit 2 as a denial — blocking every `Bash` call. A forbidden needle and a required-text assertion both guard it.
 

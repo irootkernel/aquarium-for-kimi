@@ -61,6 +61,7 @@ SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
     ("$lore-commits", "/skill:lore-commits"),
     ("$lore-query", "/skill:lore-query"),
     ("$orca-cli", "/skill:orca-cli"),
+    ("$create-podway-procedure", "/skill:create-podway-procedure"),
     ("$interview", "/skill:interview"),
     ("$deslop", "/skill:deslop"),
     ("$seed", "/skill:seed"),

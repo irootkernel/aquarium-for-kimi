@@ -1,8 +1,9 @@
 {
   "skills/independent-review/SKILL.md": "2cd3b0f42106c5f91b4974efb619f42d13c18cc0de0bbbed22643b5aa4fa2c8b",
-  "skills/dev-setup/SKILL.md": "c18e2fe08278ad95b5f8c12cfe32aee85dc7fb3cb441a94b12dd001d05ed62bf",
-  "skills/dev-setup/references/agents-guidance.md": "33b2ea94e3d335ee64dfaecb91d2261432270b2a8a2e6e5ec55d1019f4e54c03",
-  "skills/dev-setup/references/tool-catalog.md": "699d37c065bf80516f1bee0fd3fa089f33e2bd4472d29c9822ac4772062e0535",
+  "skills/dev-setup/SKILL.md": "e595a1d20abe445a6edad7dd9db9d643796d61543708d9b2a1a60ce4c87c0e3f",
+  "skills/dev-setup/references/agents-guidance.md": "1824cc77ffd0360b876e05018f9ddb03408393f7e68f0d050e5d6d86b86eb61d",
+  "skills/dev-setup/references/tool-catalog.md": "db5d6584e765b20fe7b701bb9a5f00e4c24e5a46c554a4aa740700cf87eea535",
+  "skills/dev-setup/scripts/inspect_tools.py": "ae64547e8802b94418cc1be52a5bb8fba3905795a4e75377945d24d75892840f",
   "references/orca-supervision.md": "8a3e52305153310aa663ce1b8d6d142d6c1ce613b3bb8544808fceaa688078d4",
-  "skills/orca-review/SKILL.md": "8aa672258c8c2f79c0c7b0ac9a84167fae7aeb69f7c104356c2d2b3ff3cd6cc7"
+  "skills/orca-review/SKILL.md": "0f3104dd92db51b072106a792115eb3e3c5e950643ff93faccc2662630c731eb"
 }
